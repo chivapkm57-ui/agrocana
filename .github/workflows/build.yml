@@ -1,0 +1,36 @@
+# ============================================================
+# GITHUB ACTIONS: compila automaticamente el APK en la nube
+# ============================================================
+# Este archivo le dice a GitHub: "cada vez que subas cambios,
+# usa un servidor Linux gratuito para compilar mi app y dejarme
+# el archivo .apk listo para descargar".
+#
+# NO necesitas editar nada aqui salvo que en el futuro cambiemos
+# el nombre de la carpeta del proyecto.
+
+name: Compilar APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # esto agrega un boton "Run workflow" para compilar manualmente cuando quieras
+
+jobs:
+  build-android:
+    name: Compilar para Android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el codigo del repositorio
+        uses: actions/checkout@v4
+
+      - name: Compilar con Buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
+        id: buildozer
+        with:
+          buildozer_version: stable
+
+      - name: Subir el APK como archivo descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: agrocana-apk
+          path: ${{ steps.buildozer.outputs.filename }}
