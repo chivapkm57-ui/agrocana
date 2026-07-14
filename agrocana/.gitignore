@@ -1,0 +1,13 @@
+# Entorno virtual de Python (cada quien lo crea localmente, no se sube)
+venv/
+
+# Archivos temporales de Python
+__pycache__/
+*.pyc
+
+# Base de datos local (datos de prueba, no deben ir al repositorio de codigo)
+*.db
+
+# Carpetas que genera Buildozer al compilar (se regeneran solas)
+.buildozer/
+bin/
