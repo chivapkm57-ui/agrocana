@@ -35,7 +35,8 @@ if platform != "android":
 
 from kivymd.app import MDApp
 from kivy_garden.mapview import MapView, MapMarker, MapMarkerPopup, MapSource, MapLayer
-from kivy.graphics import Color, Line, Canvas, PushMatrix, PopMatrix, MatrixInstruction, Translate, Scale
+from kivy.graphics import Color, Line, Ellipse
+import math
 from kivymd.uix.button import MDIconButton, MDRaisedButton
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.boxlayout import BoxLayout
@@ -97,34 +98,19 @@ class CapaPoligonos(MapLayer):
     Capa personalizada que se agrega sobre el mapa para dibujar el
     CONTORNO (la forma real, con lineas) de cada parcela guardada.
 
-    Un MapLayer es un tipo especial de widget que kivy_garden.mapview
-    reposiciona automaticamente cada vez que el mapa se mueve o se hace
-    zoom, llamando a nuestro metodo reposition(). Ahi es donde
-    recalculamos en que pixel de la pantalla cae cada vertice, segun
-    la vista actual del mapa, y volvemos a dibujar las lineas.
+    IMPORTANTE (correccion de un bug): la version anterior usaba una
+    "matriz de cache" (pensada para poligonos rellenos muy pesados de
+    calcular) que desalineaba las lineas cada vez que cambiabas el zoom,
+    haciendo que los poligonos chicos parecieran "desaparecer". Ahora,
+    en cada reposicionamiento, volvemos a calcular la posicion de cada
+    vertice usando el zoom ACTUAL directamente, sin ningun cache. Es un
+    poco mas de calculo, pero para lineas (a diferencia de rellenos) es
+    barato y evita por completo el problema de desalineacion.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.poligonos = []       # lista de poligonos, cada uno es una lista de (lat, lon)
-        self.initial_zoom = None
-
-        # Esta estructura de "Canvas dentro de Canvas" con matriz de
-        # transformacion es la misma tecnica que usa la propia libreria
-        # internamente: nos permite mover/escalar las lineas junto con
-        # el mapa sin tener que recalcular manualmente cada pixel en
-        # cada frame.
-        with self.canvas:
-            self.canvas_contornos = Canvas()
-            with self.canvas_contornos.before:
-                PushMatrix()
-                self.g_matrix = MatrixInstruction()
-                self.g_scale = Scale()
-                self.g_translate = Translate()
-            with self.canvas_contornos:
-                self.g_canvas = Canvas()
-            with self.canvas_contornos.after:
-                PopMatrix()
+        self.poligonos = []  # lista de poligonos, cada uno es una lista de (lat, lon)
 
     def agregar_poligono(self, vertices):
         """ Agrega un poligono (lista de vertices lat/lon) para dibujar su contorno. """
@@ -134,28 +120,9 @@ class CapaPoligonos(MapLayer):
     def reposition(self):
         """
         Kivy_garden.mapview llama a este metodo automaticamente cada vez
-        que el mapa se mueve, se hace zoom, o cambia de tamano. Aqui
-        ajustamos la matriz de transformacion para que nuestras lineas
-        se muevan exactamente igual que el mapa de fondo.
+        que el mapa se mueve, se hace zoom, o cambia de tamano. Simplemente
+        volvemos a dibujar todo desde cero con la posicion/zoom actuales.
         """
-        vx, vy = self.parent.delta_x, self.parent.delta_y
-        pzoom = self.parent.zoom
-        zoom = self.initial_zoom
-
-        if zoom is None:
-            self.initial_zoom = zoom = pzoom
-
-        if zoom != pzoom:
-            diferencia = 2 ** (pzoom - zoom)
-            vx /= diferencia
-            vy /= diferencia
-            self.g_scale.x = self.g_scale.y = diferencia
-        else:
-            self.g_scale.x = self.g_scale.y = 1.0
-
-        self.g_translate.xy = vx, vy
-        self.g_matrix.matrix = self.parent._scatter.transform
-
         self.redibujar()
 
     def _lonlat_a_xy(self, vertices):
@@ -175,8 +142,8 @@ class CapaPoligonos(MapLayer):
         if self.parent is None:
             return
 
-        self.g_canvas.clear()
-        with self.g_canvas:
+        self.canvas.clear()
+        with self.canvas:
             Color(1, 0.25, 0.1, 0.9)  # color naranja-rojo, bien visible sobre el satelital
             for vertices in self.poligonos:
                 if len(vertices) < 2:
@@ -185,6 +152,67 @@ class CapaPoligonos(MapLayer):
                 puntos_xy.append(puntos_xy[0])  # cerramos el contorno (vuelve al primer punto)
                 puntos_planos = [coordenada for punto in puntos_xy for coordenada in punto]
                 Line(points=puntos_planos, width=2)
+
+
+class CapaMiUbicacion(MapLayer):
+    """
+    Capa que muestra la posicion GPS ACTUAL como un punto azul con un
+    circulo de margen de error alrededor (igual que Google Maps o QField),
+    en vez de un pin fijo. Se actualiza en tiempo real con cada lectura
+    del GPS del telefono.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.lat = None
+        self.lon = None
+        self.precision_metros = 15  # margen de error tipico de un GPS de celular
+
+    def actualizar_posicion(self, lat, lon, precision_metros=None):
+        """ Se llama cada vez que llega una nueva lectura de GPS (o al iniciar). """
+        self.lat = lat
+        self.lon = lon
+        if precision_metros:
+            self.precision_metros = precision_metros
+        self.redibujar()
+
+    def reposition(self):
+        self.redibujar()
+
+    def redibujar(self):
+        if self.parent is None or self.lat is None:
+            return
+
+        vista = self.parent
+        zoom = vista.zoom
+
+        punto = vista.get_window_xy_from(self.lat, self.lon, zoom)
+        punto = (punto[0] - vista.delta_x, punto[1] - vista.delta_y)
+        x, y = vista._scatter.to_local(*punto)
+
+        # Formula estandar (la misma que usan Google Maps/OpenStreetMap)
+        # para saber cuantos metros representa un pixel, segun la latitud
+        # actual y el nivel de zoom. Con esto convertimos el margen de
+        # error (en metros reales) a un radio en pixeles en pantalla.
+        metros_por_pixel = 156543.03392 * math.cos(math.radians(self.lat)) / (2 ** zoom)
+        radio_pixeles = max(self.precision_metros / metros_por_pixel, 8)
+
+        self.canvas.clear()
+        with self.canvas:
+            # Circulo de margen de error (translucido)
+            Color(0.15, 0.45, 0.95, 0.25)
+            Ellipse(pos=(x - radio_pixeles, y - radio_pixeles),
+                    size=(radio_pixeles * 2, radio_pixeles * 2))
+
+            # Borde del circulo de margen de error
+            Color(0.15, 0.45, 0.95, 0.6)
+            Line(circle=(x, y, radio_pixeles), width=1.5)
+
+            # Punto central solido (mi posicion real)
+            Color(0.15, 0.45, 0.95, 1)
+            Ellipse(pos=(x - 9, y - 9), size=(18, 18))
+            Color(1, 1, 1, 1)
+            Line(circle=(x, y, 9), width=2)
 
 
 class MapaTactil(MapView):
@@ -234,11 +262,11 @@ class PantallaMapa(Screen):
         )
         contenedor.add_widget(self.mapa)
 
-        self.marcador_ubicacion = MapMarker(
-            lat=UBICACION_PRUEBA[0],
-            lon=UBICACION_PRUEBA[1]
-        )
-        self.mapa.add_marker(self.marcador_ubicacion)
+        # Capa que muestra "mi ubicacion" como un punto azul con margen de
+        # error (en vez de un pin fijo), se actualiza en tiempo real con el GPS.
+        self.capa_mi_ubicacion = CapaMiUbicacion()
+        self.mapa.add_layer(self.capa_mi_ubicacion)
+        self.capa_mi_ubicacion.actualizar_posicion(UBICACION_PRUEBA[0], UBICACION_PRUEBA[1])
 
         # Capa que dibuja el CONTORNO (forma real) de cada parcela guardada.
         self.capa_poligonos = CapaPoligonos()
@@ -252,6 +280,18 @@ class PantallaMapa(Screen):
         # Pedimos permiso de GPS (obligatorio en Android moderno) y,
         # una vez concedido, arrancamos la lectura real de ubicacion.
         self.solicitar_permisos_y_iniciar_gps()
+
+        # ----------------------------------------------------------
+        # Etiqueta de DIAGNOSTICO de GPS (arriba, chiquita) - para poder
+        # ver en pantalla que esta pasando con el GPS sin necesitar
+        # herramientas de programador conectadas al telefono.
+        # ----------------------------------------------------------
+        self.etiqueta_gps = EtiquetaConFondo(
+            texto_inicial="GPS: iniciando...",
+            pos_hint={"x": 0.02, "top": 0.99},
+            size_hint=(0.75, 0.05)
+        )
+        contenedor.add_widget(self.etiqueta_gps)
 
         # ----------------------------------------------------------
         # Boton "Mi Ubicacion"
@@ -291,30 +331,30 @@ class PantallaMapa(Screen):
         fila_2 = BoxLayout(orientation="horizontal", spacing=3, size_hint=(1, 0.5))
 
         self.boton_manual = MDRaisedButton(
-            text="Manual", size_hint=(1, 1), font_size=15,
+            text="Manual", size_hint=(1, 1), font_size=19,
             on_release=self.activar_modo_manual
         )
         self.boton_recorrido = MDRaisedButton(
-            text="Recorrido", size_hint=(1, 1), font_size=15,
+            text="Recorrido", size_hint=(1, 1), font_size=19,
             on_release=self.activar_modo_recorrido
         )
         boton_agregar_aqui = MDRaisedButton(
-            text="+ Vertice", size_hint=(1, 1), font_size=15,
+            text="+ Vertice", size_hint=(1, 1), font_size=19,
             on_release=self.agregar_vertice_en_mi_ubicacion
         )
 
         boton_deshacer = MDRaisedButton(
-            text="Deshacer", size_hint=(1, 1), font_size=15,
+            text="Deshacer", size_hint=(1, 1), font_size=19,
             md_bg_color=(0.9, 0.6, 0.1, 1),
             on_release=self.deshacer_vertice
         )
         boton_cancelar = MDRaisedButton(
-            text="Cancelar", size_hint=(1, 1), font_size=15,
+            text="Cancelar", size_hint=(1, 1), font_size=19,
             md_bg_color=(0.6, 0.6, 0.6, 1),
             on_release=self.cancelar_dibujo
         )
         boton_cerrar = MDRaisedButton(
-            text="Cerrar", size_hint=(1, 1), font_size=15,
+            text="Cerrar", size_hint=(1, 1), font_size=19,
             md_bg_color=(0.1, 0.7, 0.3, 1),
             on_release=self.cerrar_poligono
         )
@@ -399,11 +439,13 @@ class PantallaMapa(Screen):
                 def al_responder(permisos, resultados):
                     if all(resultados):
                         print("Permiso de ubicacion concedido.")
+                        self.etiqueta_gps.text = "GPS: permiso OK, iniciando..."
                         self.iniciar_gps()
                     else:
                         print("Permiso de ubicacion DENEGADO por el usuario. "
                               "El GPS no funcionara hasta que se conceda "
                               "desde Ajustes > Aplicaciones > Permisos.")
+                        self.etiqueta_gps.text = "GPS: PERMISO DENEGADO"
 
                 request_permissions(
                     [Permission.ACCESS_FINE_LOCATION, Permission.ACCESS_COARSE_LOCATION],
@@ -425,27 +467,32 @@ class PantallaMapa(Screen):
                 )
                 gps.start(minTime=1000, minDistance=1)
                 print("GPS iniciado correctamente (Android).")
+                self.etiqueta_gps.text = "GPS: esperando primera senal..."
             except Exception as error:
                 print(f"No se pudo iniciar el GPS: {error}")
+                self.etiqueta_gps.text = f"GPS: error al iniciar ({error})"
         else:
             print("GPS real no disponible en este dispositivo (PC de pruebas). "
                   "Usando la ubicacion de prueba fija.")
+            self.etiqueta_gps.text = "GPS: no disponible (modo PC de prueba)"
 
     def on_gps_ubicacion(self, **datos_gps):
         lat = datos_gps.get("lat")
         lon = datos_gps.get("lon")
+        precision = datos_gps.get("accuracy")  # margen de error en metros, si el telefono lo entrega
         if lat is not None and lon is not None:
-            self.marcador_ubicacion.lat = lat
-            self.marcador_ubicacion.lon = lon
-            self.mapa.trigger_update(True)
+            self.capa_mi_ubicacion.actualizar_posicion(lat, lon, precision)
+            texto_precision = f" (+/-{precision:.0f}m)" if precision else ""
+            self.etiqueta_gps.text = f"GPS: {lat:.5f}, {lon:.5f}{texto_precision}"
 
     def on_gps_estado(self, stype, status):
         print(f"Estado del GPS -> tipo: {stype}, status: {status}")
+        self.etiqueta_gps.text = f"GPS estado: {status}"
 
     def centrar_en_mi_ubicacion(self, instancia_boton):
-        lat = self.marcador_ubicacion.lat
-        lon = self.marcador_ubicacion.lon
-        self.mapa.center_on(lat, lon)
+        if self.capa_mi_ubicacion.lat is None:
+            return
+        self.mapa.center_on(self.capa_mi_ubicacion.lat, self.capa_mi_ubicacion.lon)
 
     # ----------------------------------------------------------------
     # MODOS DE DIBUJO
@@ -472,8 +519,11 @@ class PantallaMapa(Screen):
     # MANEJO DE VERTICES (poligono EN PROGRESO)
     # ----------------------------------------------------------------
     def agregar_vertice_en_mi_ubicacion(self, instancia_boton):
-        lat = self.marcador_ubicacion.lat
-        lon = self.marcador_ubicacion.lon
+        if self.capa_mi_ubicacion.lat is None:
+            self.etiqueta_estado.text = "Ubicacion aun no disponible"
+            return
+        lat = self.capa_mi_ubicacion.lat
+        lon = self.capa_mi_ubicacion.lon
         self.agregar_vertice(lat, lon)
 
     def agregar_vertice(self, lat, lon):
