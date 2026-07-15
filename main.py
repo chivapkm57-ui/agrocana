@@ -126,14 +126,18 @@ class CapaPoligonos(MapLayer):
         self.redibujar()
 
     def _lonlat_a_xy(self, vertices):
-        """ Convierte una lista de (lat, lon) a posiciones de pixel (x, y) en pantalla. """
+        """
+        Convierte una lista de (lat, lon) a posiciones de pixel (x, y) en
+        pantalla. get_window_xy_from() ya devuelve la posicion ABSOLUTA
+        correcta en pantalla (es la misma funcion que usan los marcadores,
+        que SI se ven bien) - por eso aqui la usamos directo, sin ninguna
+        conversion adicional.
+        """
         vista = self.parent
         zoom = vista.zoom
         puntos = []
         for lat, lon in vertices:
             punto = vista.get_window_xy_from(lat, lon, zoom)
-            punto = (punto[0] - vista.delta_x, punto[1] - vista.delta_y)
-            punto = vista._scatter.to_local(*punto)
             puntos.append(punto)
         return puntos
 
@@ -186,9 +190,7 @@ class CapaMiUbicacion(MapLayer):
         vista = self.parent
         zoom = vista.zoom
 
-        punto = vista.get_window_xy_from(self.lat, self.lon, zoom)
-        punto = (punto[0] - vista.delta_x, punto[1] - vista.delta_y)
-        x, y = vista._scatter.to_local(*punto)
+        x, y = vista.get_window_xy_from(self.lat, self.lon, zoom)
 
         # Formula estandar (la misma que usan Google Maps/OpenStreetMap)
         # para saber cuantos metros representa un pixel, segun la latitud
@@ -277,10 +279,6 @@ class PantallaMapa(Screen):
         # vez que zonas ya fueron levantadas.
         self.cargar_parcelas_guardadas()
 
-        # Pedimos permiso de GPS (obligatorio en Android moderno) y,
-        # una vez concedido, arrancamos la lectura real de ubicacion.
-        self.solicitar_permisos_y_iniciar_gps()
-
         # ----------------------------------------------------------
         # Etiqueta de DIAGNOSTICO de GPS (arriba, chiquita) - para poder
         # ver en pantalla que esta pasando con el GPS sin necesitar
@@ -298,7 +296,7 @@ class PantallaMapa(Screen):
         # ----------------------------------------------------------
         boton_ubicacion = MDIconButton(
             icon="crosshairs-gps",
-            pos_hint={"right": 0.97, "y": 0.34},
+            pos_hint={"right": 0.97, "y": 0.40},
             md_bg_color=(1, 1, 1, 0.9),
             theme_icon_color="Custom",
             icon_color=(0.1, 0.4, 0.9, 1),
@@ -311,7 +309,7 @@ class PantallaMapa(Screen):
         # ----------------------------------------------------------
         self.etiqueta_estado = EtiquetaConFondo(
             texto_inicial="Vertices: 0",
-            pos_hint={"center_x": 0.5, "y": 0.255},
+            pos_hint={"center_x": 0.5, "y": 0.32},
             size_hint=(0.6, 0.05)
         )
         contenedor.add_widget(self.etiqueta_estado)
@@ -321,7 +319,7 @@ class PantallaMapa(Screen):
         # ----------------------------------------------------------
         barra = BoxLayout(
             orientation="vertical",
-            size_hint=(1, 0.25),
+            size_hint=(1, 0.30),
             pos_hint={"x": 0, "y": 0},
             spacing=3,
             padding=3
@@ -331,30 +329,30 @@ class PantallaMapa(Screen):
         fila_2 = BoxLayout(orientation="horizontal", spacing=3, size_hint=(1, 0.5))
 
         self.boton_manual = MDRaisedButton(
-            text="Manual", size_hint=(1, 1), font_size=19,
+            text="Manual", size_hint=(1, 1), font_size=24,
             on_release=self.activar_modo_manual
         )
         self.boton_recorrido = MDRaisedButton(
-            text="Recorrido", size_hint=(1, 1), font_size=19,
+            text="Recorrido", size_hint=(1, 1), font_size=24,
             on_release=self.activar_modo_recorrido
         )
         boton_agregar_aqui = MDRaisedButton(
-            text="+ Vertice", size_hint=(1, 1), font_size=19,
+            text="+ Vertice", size_hint=(1, 1), font_size=24,
             on_release=self.agregar_vertice_en_mi_ubicacion
         )
 
         boton_deshacer = MDRaisedButton(
-            text="Deshacer", size_hint=(1, 1), font_size=19,
+            text="Deshacer", size_hint=(1, 1), font_size=24,
             md_bg_color=(0.9, 0.6, 0.1, 1),
             on_release=self.deshacer_vertice
         )
         boton_cancelar = MDRaisedButton(
-            text="Cancelar", size_hint=(1, 1), font_size=19,
+            text="Cancelar", size_hint=(1, 1), font_size=24,
             md_bg_color=(0.6, 0.6, 0.6, 1),
             on_release=self.cancelar_dibujo
         )
         boton_cerrar = MDRaisedButton(
-            text="Cerrar", size_hint=(1, 1), font_size=19,
+            text="Cerrar", size_hint=(1, 1), font_size=24,
             md_bg_color=(0.1, 0.7, 0.3, 1),
             on_release=self.cerrar_poligono
         )
@@ -375,6 +373,12 @@ class PantallaMapa(Screen):
         self.add_widget(contenedor)
 
         self.actualizar_apariencia_botones()
+
+        # Pedimos permiso de GPS (obligatorio en Android moderno) y,
+        # una vez concedido, arrancamos la lectura real de ubicacion.
+        # Esto va AL FINAL porque internamente ya escribe mensajes en
+        # self.etiqueta_gps, que debe existir antes de llamar esto.
+        self.solicitar_permisos_y_iniciar_gps()
 
     # ----------------------------------------------------------------
     # PARCELAS GUARDADAS (persistentes en el mapa)
@@ -467,7 +471,31 @@ class PantallaMapa(Screen):
                 )
                 gps.start(minTime=1000, minDistance=1)
                 print("GPS iniciado correctamente (Android).")
-                self.etiqueta_gps.text = "GPS: esperando primera senal..."
+
+                # DIAGNOSTICO: le preguntamos directamente a Android cuantos
+                # "proveedores" de ubicacion estan disponibles (GPS satelital,
+                # red movil/wifi, etc). Si la respuesta es 0, significa que
+                # la Ubicacion esta APAGADA a nivel de todo el sistema Android
+                # (no solo el permiso de esta app) - esa es la causa mas comun
+                # de que nunca llegue ninguna coordenada.
+                try:
+                    from jnius import autoclass
+                    from plyer.platforms.android import activity
+                    Context = autoclass("android.content.Context")
+                    gestor_ubicacion = activity.getSystemService(Context.LOCATION_SERVICE)
+                    proveedores = gestor_ubicacion.getProviders(False)
+                    cantidad = proveedores.size()
+                    if cantidad == 0:
+                        self.etiqueta_gps.text = (
+                            "GPS: 0 proveedores. Activa 'Ubicacion' en "
+                            "Ajustes del telefono (no solo el permiso)."
+                        )
+                    else:
+                        self.etiqueta_gps.text = f"GPS: {cantidad} proveedor(es), esperando senal..."
+                except Exception as error_diagnostico:
+                    print(f"No se pudo diagnosticar proveedores de GPS: {error_diagnostico}")
+                    self.etiqueta_gps.text = "GPS: esperando primera senal..."
+
             except Exception as error:
                 print(f"No se pudo iniciar el GPS: {error}")
                 self.etiqueta_gps.text = f"GPS: error al iniciar ({error})"
