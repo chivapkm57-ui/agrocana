@@ -45,6 +45,7 @@ from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.graphics import Rectangle
+from kivy.clock import Clock
 
 import database
 import geometria
@@ -53,6 +54,11 @@ try:
     from plyer import gps
 except Exception:
     gps = None
+
+# Estas librerias solo existen y se pueden importar en Android (dependen
+# de pyjnius, que solo funciona dentro de una app Android compilada).
+# Por eso el import se hace DENTRO de la funcion que las usa (mas abajo),
+# protegido con try/except, y no aqui arriba.
 
 UBICACION_PRUEBA = (8.9824, -79.5199)
 
@@ -463,59 +469,115 @@ class PantallaMapa(Screen):
             self.iniciar_gps()
 
     def iniciar_gps(self):
-        if platform == "android" and gps is not None:
-            try:
-                gps.configure(
-                    on_location=self.on_gps_ubicacion,
-                    on_status=self.on_gps_estado
-                )
-                gps.start(minTime=1000, minDistance=1)
-                print("GPS iniciado correctamente (Android).")
-
-                # DIAGNOSTICO: le preguntamos directamente a Android cuantos
-                # "proveedores" de ubicacion estan disponibles (GPS satelital,
-                # red movil/wifi, etc). Si la respuesta es 0, significa que
-                # la Ubicacion esta APAGADA a nivel de todo el sistema Android
-                # (no solo el permiso de esta app) - esa es la causa mas comun
-                # de que nunca llegue ninguna coordenada.
-                try:
-                    from jnius import autoclass
-                    from plyer.platforms.android import activity
-                    Context = autoclass("android.content.Context")
-                    gestor_ubicacion = activity.getSystemService(Context.LOCATION_SERVICE)
-                    proveedores = gestor_ubicacion.getProviders(False)
-                    cantidad = proveedores.size()
-                    if cantidad == 0:
-                        self.etiqueta_gps.text = (
-                            "GPS: 0 proveedores. Activa 'Ubicacion' en "
-                            "Ajustes del telefono (no solo el permiso)."
-                        )
-                    else:
-                        self.etiqueta_gps.text = f"GPS: {cantidad} proveedor(es), esperando senal..."
-                except Exception as error_diagnostico:
-                    print(f"No se pudo diagnosticar proveedores de GPS: {error_diagnostico}")
-                    self.etiqueta_gps.text = "GPS: esperando primera senal..."
-
-            except Exception as error:
-                print(f"No se pudo iniciar el GPS: {error}")
-                self.etiqueta_gps.text = f"GPS: error al iniciar ({error})"
-        else:
+        """
+        Implementacion DIRECTA de GPS usando pyjnius (hablamos directo con
+        las clases de Android en Java, sin pasar por la libreria plyer).
+        Esto nos da control total: sabemos el nombre exacto de cada
+        proveedor de ubicacion, si alguno falla al registrarse, y cada
+        evento de estado que Android reporte, en tiempo real y en pantalla.
+        """
+        if platform != "android":
             print("GPS real no disponible en este dispositivo (PC de pruebas). "
                   "Usando la ubicacion de prueba fija.")
             self.etiqueta_gps.text = "GPS: no disponible (modo PC de prueba)"
+            return
 
-    def on_gps_ubicacion(self, **datos_gps):
-        lat = datos_gps.get("lat")
-        lon = datos_gps.get("lon")
-        precision = datos_gps.get("accuracy")  # margen de error en metros, si el telefono lo entrega
-        if lat is not None and lon is not None:
-            self.capa_mi_ubicacion.actualizar_posicion(lat, lon, precision)
-            texto_precision = f" (+/-{precision:.0f}m)" if precision else ""
-            self.etiqueta_gps.text = f"GPS: {lat:.5f}, {lon:.5f}{texto_precision}"
+        try:
+            from jnius import autoclass, PythonJavaClass, java_method
+            from plyer.platforms.android import activity
 
-    def on_gps_estado(self, stype, status):
-        print(f"Estado del GPS -> tipo: {stype}, status: {status}")
-        self.etiqueta_gps.text = f"GPS estado: {status}"
+            Context = autoclass("android.content.Context")
+            Looper = autoclass("android.os.Looper")
+
+            gestor_ubicacion = activity.getSystemService(Context.LOCATION_SERVICE)
+            proveedores_java = gestor_ubicacion.getProviders(False)
+            cantidad = proveedores_java.size()
+            nombres_proveedores = [proveedores_java.get(i) for i in range(cantidad)]
+
+            if cantidad == 0:
+                self.etiqueta_gps.text = (
+                    "GPS: 0 proveedores. Activa 'Ubicacion' en Ajustes del telefono."
+                )
+                return
+
+            # Esta clase implementa la "interfaz" de Android LocationListener
+            # directamente en Python (via pyjnius), para recibir los eventos
+            # tal como los envia el sistema operativo, sin intermediarios.
+            pantalla = self  # referencia a PantallaMapa, para usar dentro de la clase
+
+            class EscuchaUbicacionDirecta(PythonJavaClass):
+                __javainterfaces__ = ["android/location/LocationListener"]
+
+                @java_method("(Landroid/location/Location;)V")
+                def onLocationChanged(self, location):
+                    lat = location.getLatitude()
+                    lon = location.getLongitude()
+                    precision = location.getAccuracy()
+                    # Programamos la actualizacion de la interfaz para que
+                    # corra de forma segura en el hilo principal de Kivy
+                    # (las funciones de Android pueden llamarnos desde un
+                    # contexto distinto, y tocar widgets directamente desde
+                    # ahi puede causar comportamientos raros o crashes).
+                    Clock.schedule_once(
+                        lambda dt: pantalla._gps_actualizar_ubicacion(lat, lon, precision)
+                    )
+
+                @java_method("(Ljava/lang/String;)V")
+                def onProviderEnabled(self, proveedor):
+                    Clock.schedule_once(
+                        lambda dt: pantalla._gps_actualizar_diagnostico(
+                            f"proveedor '{proveedor}' HABILITADO"
+                        )
+                    )
+
+                @java_method("(Ljava/lang/String;)V")
+                def onProviderDisabled(self, proveedor):
+                    Clock.schedule_once(
+                        lambda dt: pantalla._gps_actualizar_diagnostico(
+                            f"proveedor '{proveedor}' DESHABILITADO"
+                        )
+                    )
+
+                @java_method("(Ljava/lang/String;ILandroid/os/Bundle;)V")
+                def onStatusChanged(self, proveedor, status, extras):
+                    Clock.schedule_once(
+                        lambda dt: pantalla._gps_actualizar_diagnostico(
+                            f"proveedor '{proveedor}' cambio de estado ({status})"
+                        )
+                    )
+
+            self.escucha_ubicacion = EscuchaUbicacionDirecta()
+
+            registrados = []
+            errores = []
+            for nombre in nombres_proveedores:
+                try:
+                    gestor_ubicacion.requestLocationUpdates(
+                        nombre, 1000, 1.0, self.escucha_ubicacion, Looper.getMainLooper()
+                    )
+                    registrados.append(nombre)
+                except Exception as error_proveedor:
+                    errores.append(f"{nombre}:{error_proveedor}")
+
+            texto = f"GPS: escuchando [{', '.join(registrados)}]"
+            if errores:
+                texto += f" | fallo en: {', '.join(errores)}"
+            self.etiqueta_gps.text = texto
+
+        except Exception as error:
+            print(f"No se pudo iniciar el GPS directo: {error}")
+            self.etiqueta_gps.text = f"GPS: error al iniciar ({error})"
+
+    def _gps_actualizar_ubicacion(self, lat, lon, precision):
+        """ Se ejecuta (de forma segura, en el hilo principal) con cada nueva coordenada. """
+        self.capa_mi_ubicacion.actualizar_posicion(lat, lon, precision)
+        texto_precision = f" (+/-{precision:.0f}m)" if precision else ""
+        self.etiqueta_gps.text = f"GPS: {lat:.5f}, {lon:.5f}{texto_precision}"
+
+    def _gps_actualizar_diagnostico(self, mensaje):
+        """ Se ejecuta con cada evento de estado (habilitado/deshabilitado/cambio). """
+        print(f"GPS evento: {mensaje}")
+        self.etiqueta_gps.text = f"GPS evento: {mensaje}"
 
     def centrar_en_mi_ubicacion(self, instancia_boton):
         if self.capa_mi_ubicacion.lat is None:

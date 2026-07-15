@@ -18,7 +18,9 @@ source.include_exts = py,png,jpg,kv,atlas,db
 # LIBRERIAS DE PYTHON QUE NECESITA LA APP
 # (equivalente movil de los "pip install" que ya hiciste en tu PC)
 # ------------------------------------------------------------------
-requirements = python3,kivy==2.3.1,kivymd,plyer,kivy_garden.mapview,utm
+# Agregamos pyjnius y android explicitamente porque ahora los usamos
+# directamente (antes plyer los traia sin que tuvieramos que pedirlos).
+requirements = python3,kivy==2.3.1,kivymd,plyer,kivy_garden.mapview,utm,pyjnius,android
 
 # Orientacion de pantalla: portrait = vertical (normal para celular)
 orientation = portrait
