@@ -83,3 +83,35 @@ def poligono_a_geojson(vertices):
     }
 
     return json.dumps(geojson_diccionario)
+
+
+def geojson_a_vertices(geojson_texto):
+    """
+    Hace el proceso INVERSO a poligono_a_geojson(): toma el texto GeoJSON
+    guardado en la base de datos y lo convierte de vuelta a una lista
+    de vertices (lat, lon), lista para usar en Python/Kivy.
+
+    Se usa, por ejemplo, para volver a mostrar en el mapa los poligonos
+    que ya se guardaron anteriormente.
+    """
+    datos = json.loads(geojson_texto)
+    anillo = datos["coordinates"][0]
+
+    # El anillo esta en [lon, lat] y el ultimo punto repite al primero
+    # (para "cerrar" el poligono). Lo quitamos aqui para no duplicarlo.
+    vertices = [(lat, lon) for lon, lat in anillo[:-1]]
+    return vertices
+
+
+def calcular_centroide(vertices):
+    """
+    Calcula el punto promedio (centro aproximado) de una lista de vertices.
+    Lo usamos para poner UN solo marcador representando toda la parcela
+    guardada en el mapa (en vez de mostrar cada vertice suelto).
+    """
+    if not vertices:
+        return None
+
+    lat_promedio = sum(lat for lat, lon in vertices) / len(vertices)
+    lon_promedio = sum(lon for lat, lon in vertices) / len(vertices)
+    return (lat_promedio, lon_promedio)
