@@ -55,10 +55,28 @@ try:
 except Exception:
     gps = None
 
-# Estas librerias solo existen y se pueden importar en Android (dependen
-# de pyjnius, que solo funciona dentro de una app Android compilada).
-# Por eso el import se hace DENTRO de la funcion que las usa (mas abajo),
-# protegido con try/except, y no aqui arriba.
+# ------------------------------------------------------------------
+# IMPORTANTE: PythonJavaClass debe importarse (y la clase que la usa
+# debe DEFINIRSE) a nivel de MODULO, no dentro de una funcion. Si se
+# define anidada dentro de un metodo, el proceso de compilacion de
+# Android a veces no logra generar correctamente el puente Java
+# necesario, y el resultado es que la clase se "registra" sin error,
+# pero nunca recibe ningun evento - exactamente lo que estabamos viendo.
+#
+# En PC (donde pyjnius no existe) creamos versiones "vacias" de estos
+# nombres, solo para que el archivo no falle al importarse; en PC nunca
+# se usan de verdad.
+# ------------------------------------------------------------------
+if platform == "android":
+    from jnius import PythonJavaClass, java_method
+else:
+    class PythonJavaClass:
+        pass
+
+    def java_method(firma):
+        def decorador(funcion):
+            return funcion
+        return decorador
 
 UBICACION_PRUEBA = (8.9824, -79.5199)
 
@@ -221,6 +239,56 @@ class CapaMiUbicacion(MapLayer):
             Ellipse(pos=(x - 9, y - 9), size=(18, 18))
             Color(1, 1, 1, 1)
             Line(circle=(x, y, 9), width=2)
+
+
+class EscuchaUbicacionDirecta(PythonJavaClass):
+    """
+    Implementa la interfaz de Android "LocationListener" directamente en
+    Python, usando pyjnius. IMPORTANTE: esta clase debe quedar definida
+    aqui, al nivel principal del archivo (no dentro de ninguna funcion),
+    para que Android pueda generar correctamente el puente Java al
+    compilar la app.
+
+    Recibe 2 funciones de callback en el constructor (una para cuando
+    llega una nueva coordenada, otra para mensajes de diagnostico), en
+    vez de usar una referencia directa a la pantalla, para mantenerla
+    independiente y reutilizable.
+    """
+    __javainterfaces__ = ["android/location/LocationListener"]
+
+    def __init__(self, callback_ubicacion, callback_diagnostico):
+        super().__init__()
+        self.callback_ubicacion = callback_ubicacion
+        self.callback_diagnostico = callback_diagnostico
+
+    @java_method("(Landroid/location/Location;)V")
+    def onLocationChanged(self, location):
+        lat = location.getLatitude()
+        lon = location.getLongitude()
+        precision = location.getAccuracy()
+        # Programamos la actualizacion de la interfaz para que corra de
+        # forma segura en el hilo principal de Kivy (Android nos llama
+        # desde su propio contexto, y tocar widgets directamente desde
+        # ahi puede causar comportamientos raros).
+        Clock.schedule_once(lambda dt: self.callback_ubicacion(lat, lon, precision))
+
+    @java_method("(Ljava/lang/String;)V")
+    def onProviderEnabled(self, proveedor):
+        Clock.schedule_once(
+            lambda dt: self.callback_diagnostico(f"proveedor '{proveedor}' HABILITADO")
+        )
+
+    @java_method("(Ljava/lang/String;)V")
+    def onProviderDisabled(self, proveedor):
+        Clock.schedule_once(
+            lambda dt: self.callback_diagnostico(f"proveedor '{proveedor}' DESHABILITADO")
+        )
+
+    @java_method("(Ljava/lang/String;ILandroid/os/Bundle;)V")
+    def onStatusChanged(self, proveedor, status, extras):
+        Clock.schedule_once(
+            lambda dt: self.callback_diagnostico(f"proveedor '{proveedor}' cambio de estado ({status})")
+        )
 
 
 class MapaTactil(MapView):
@@ -483,7 +551,7 @@ class PantallaMapa(Screen):
             return
 
         try:
-            from jnius import autoclass, PythonJavaClass, java_method
+            from jnius import autoclass
             from plyer.platforms.android import activity
 
             Context = autoclass("android.content.Context")
@@ -500,53 +568,10 @@ class PantallaMapa(Screen):
                 )
                 return
 
-            # Esta clase implementa la "interfaz" de Android LocationListener
-            # directamente en Python (via pyjnius), para recibir los eventos
-            # tal como los envia el sistema operativo, sin intermediarios.
-            pantalla = self  # referencia a PantallaMapa, para usar dentro de la clase
-
-            class EscuchaUbicacionDirecta(PythonJavaClass):
-                __javainterfaces__ = ["android/location/LocationListener"]
-
-                @java_method("(Landroid/location/Location;)V")
-                def onLocationChanged(self, location):
-                    lat = location.getLatitude()
-                    lon = location.getLongitude()
-                    precision = location.getAccuracy()
-                    # Programamos la actualizacion de la interfaz para que
-                    # corra de forma segura en el hilo principal de Kivy
-                    # (las funciones de Android pueden llamarnos desde un
-                    # contexto distinto, y tocar widgets directamente desde
-                    # ahi puede causar comportamientos raros o crashes).
-                    Clock.schedule_once(
-                        lambda dt: pantalla._gps_actualizar_ubicacion(lat, lon, precision)
-                    )
-
-                @java_method("(Ljava/lang/String;)V")
-                def onProviderEnabled(self, proveedor):
-                    Clock.schedule_once(
-                        lambda dt: pantalla._gps_actualizar_diagnostico(
-                            f"proveedor '{proveedor}' HABILITADO"
-                        )
-                    )
-
-                @java_method("(Ljava/lang/String;)V")
-                def onProviderDisabled(self, proveedor):
-                    Clock.schedule_once(
-                        lambda dt: pantalla._gps_actualizar_diagnostico(
-                            f"proveedor '{proveedor}' DESHABILITADO"
-                        )
-                    )
-
-                @java_method("(Ljava/lang/String;ILandroid/os/Bundle;)V")
-                def onStatusChanged(self, proveedor, status, extras):
-                    Clock.schedule_once(
-                        lambda dt: pantalla._gps_actualizar_diagnostico(
-                            f"proveedor '{proveedor}' cambio de estado ({status})"
-                        )
-                    )
-
-            self.escucha_ubicacion = EscuchaUbicacionDirecta()
+            self.escucha_ubicacion = EscuchaUbicacionDirecta(
+                callback_ubicacion=self._gps_actualizar_ubicacion,
+                callback_diagnostico=self._gps_actualizar_diagnostico
+            )
 
             registrados = []
             errores = []
