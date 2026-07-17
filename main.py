@@ -322,6 +322,12 @@ class PantallaMapa(Screen):
         self.marcadores_vertices = []    # pines del poligono EN PROGRESO
         self.marcadores_guardados = []   # pines de parcelas YA GUARDADAS (permanentes)
 
+        # Se pone en True la PRIMERA vez que llega una coordenada real del
+        # GPS (no la de prueba), para centrar el mapa ahi automaticamente
+        # una sola vez. Despues de esa vez, el usuario puede moverse por
+        # el mapa libremente sin que lo estemos recentrando solos.
+        self.gps_centrado_automatico_hecho = False
+
         contenedor = FloatLayout()
 
         fuente_satelital = MapSource(
@@ -598,6 +604,15 @@ class PantallaMapa(Screen):
         self.capa_mi_ubicacion.actualizar_posicion(lat, lon, precision)
         texto_precision = f" (+/-{precision:.0f}m)" if precision else ""
         self.etiqueta_gps.text = f"GPS: {lat:.5f}, {lon:.5f}{texto_precision}"
+
+        # La PRIMERA vez que llega una coordenada real, centramos el mapa
+        # ahi automaticamente (sin que el usuario tenga que tocar el boton
+        # de ubicacion). Esto ademas nos sirve como prueba visual clara:
+        # si el mapa "salta solo" a tu posicion real, confirma que el GPS
+        # esta funcionando de verdad.
+        if not self.gps_centrado_automatico_hecho:
+            self.mapa.center_on(lat, lon)
+            self.gps_centrado_automatico_hecho = True
 
     def _gps_actualizar_diagnostico(self, mensaje):
         """ Se ejecuta con cada evento de estado (habilitado/deshabilitado/cambio). """
