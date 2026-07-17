@@ -50,10 +50,11 @@ from kivy.clock import Clock
 import database
 import geometria
 
-try:
-    from plyer import gps
-except Exception:
-    gps = None
+# NOTA: eliminamos "from plyer import gps" porque ya no lo usamos (nuestra
+# implementacion de GPS habla directo con Android via pyjnius, ver mas
+# abajo). Mantenerlo importado sin usarlo podia estar disparando codigo
+# interno de plyer que no necesitamos, y que podria chocar con la version
+# de pyjnius instalada.
 
 # ------------------------------------------------------------------
 # IMPORTANTE: PythonJavaClass debe importarse (y la clase que la usa
