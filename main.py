@@ -257,8 +257,12 @@ class EscuchaUbicacionDirecta(PythonJavaClass):
     """
     __javainterfaces__ = ["android/location/LocationListener"]
 
-    def __init__(self, callback_ubicacion, callback_diagnostico):
-        super().__init__()
+    def __init__(self, callback_ubicacion, callback_diagnostico, *args, **kwargs):
+        # *args/**kwargs: por si pyjnius internamente necesita pasar algo
+        # adicional a la clase base al implementar la interfaz de Android.
+        # Los recibimos aqui y se los pasamos a super().__init__() tal
+        # cual, sin que choquen con nuestros 2 parametros propios.
+        super().__init__(*args, **kwargs)
         self.callback_ubicacion = callback_ubicacion
         self.callback_diagnostico = callback_diagnostico
 
@@ -576,8 +580,8 @@ class PantallaMapa(Screen):
                 return
 
             self.escucha_ubicacion = EscuchaUbicacionDirecta(
-                callback_ubicacion=self._gps_actualizar_ubicacion,
-                callback_diagnostico=self._gps_actualizar_diagnostico
+                self._gps_actualizar_ubicacion,
+                self._gps_actualizar_diagnostico
             )
 
             registrados = []
